@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>FeatherLine | 2-Player Online Badminton</title>
+
+  <!-- Primary Meta Tags -->
+  <meta name="title" content="FeatherLine | 2-Player Online Badminton">
+  <meta name="description" content="FeatherLine is a responsive, cross-platform 2-player browser badminton game. Play across two separate devices with guided serve arcs, off-screen feather arrow tracking, room codes, and WebRTC sync.">
+  <meta name="theme-color" content="#0d1117">
+
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://featherline.vercel.app/">
+  <meta property="og:title" content="FeatherLine | 2-Player Online Badminton">
+  <meta property="og:description" content="Play badminton in real time across two separate devices with guided serve arcs, feather arrow tracking, room codes, and explosive jump smashes.">
+  <meta property="og:image" content="https://images.unsplash.com/photo-1626224583764-f87db24ac4ea?auto=format&fit=crop&w=1200&q=80">
+
+  <!-- Twitter -->
+  <meta property="twitter:card" content="summary_large_image">
+  <meta property="twitter:title" content="FeatherLine | 2-Player Online Badminton">
+  <meta property="twitter:description" content="Play badminton in real time across two separate devices with guided serve arcs, feather arrow tracking, room codes, and explosive jump smashes.">
+
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏸</text></svg>">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&family=Teko:wght@600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="style.css">
+
+  <!-- PeerJS for zero-server WebRTC DataChannel connection across devices -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <!-- Main Game Container -->
+  <div id="game-container">
+    <!-- Virtual 1280x720 Canvas -->
+    <canvas id="game-canvas" width="1280" height="720"></canvas>
+
+    <!-- Top In-Game HUD -->
+    <header id="in-game-hud" class="hud-layer hidden">
+      <!-- Player 1 Badge (Left) -->
+      <div class="hud-left">
+        <div class="player-badge p1-badge">
+          <span class="badge-role">P1</span>
+          <span id="hud-p1-name" class="player-name">Player 1</span>
+          <span id="hud-p1-assist-badge" class="assist-badge hidden">BOOST</span>
+          <div id="hud-p1-serve" class="serve-indicator">SERVE</div>
+        </div>
+      </div>
+
+      <!-- Center HUD: Connection Status, Scoreboard & Notifications -->
+      <div class="hud-center">
+        <!-- Room Status & Ping Indicator -->
+        <div id="hud-status-pill" class="status-pill">
+          <span id="hud-status-dot" class="status-dot"></span>
+          <span id="hud-status-text">CONNECTING</span>
+          <span id="hud-ping-text" class="ping-badge"></span>
+        </div>
+
+        <!-- VS Mode Scoreboard -->
+        <div id="vs-scoreboard" class="scoreboard">
+          <span id="hud-p1-score" class="score-num">0</span>
+          <span class="score-divider">:</span>
+          <span id="hud-p2-score" class="score-num">0</span>
+        </div>
+
+        <!-- Co-Op Mode Streak Board -->
+        <div id="coop-scoreboard" class="coop-board hidden">
+          <div class="coop-streak-pill">
+            <span class="coop-label">RALLY STREAK</span>
+            <span id="coop-streak-count" class="coop-num">0</span>
+          </div>
+          <div class="coop-best-tag">BEST: <span id="coop-best-count">0</span></div>
+        </div>
+
+        <!-- VS Rally Counter -->
+        <div id="rally-counter" class="rally-pill">RALLY: <span id="rally-count">0</span></div>
+        
+        <!-- Match Point Banner -->
+        <div id="match-point-banner" class="match-point-tag hidden">MATCH POINT</div>
+
+        <!-- Co-Op Milestone Flare Banner -->
+        <div id="coop-milestone-banner" class="milestone-tag hidden">STREAK: 10! 🔥</div>
+      </div>
+
+      <!-- Player 2 Badge (Right) -->
+      <div class="hud-right">
+        <div class="player-badge p2-badge">
+          <div id="hud-p2-serve" class="serve-indicator hidden">SERVE</div>
+          <span id="hud-p2-assist-badge" class="assist-badge hidden">BOOST</span>
+          <span id="hud-p2-name" class="player-name">Player 2</span>
+          <span class="badge-role">P2</span>
+        </div>
+        <div class="hud-actions">
+          <button id="btn-touch-toggle" class="icon-btn" title="Toggle On-Screen Touch Controls" aria-label="Toggle Touch Controls">📱</button>
+          <button id="btn-audio-toggle" class="icon-btn" title="Toggle Sound" aria-label="Toggle Sound">🔊</button>
+          <button id="btn-pause" class="icon-btn" title="Pause / Menu" aria-label="Pause Game">⏸</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Two-Device Start & Lobby Screen -->
+    <div id="lobby-screen" class="overlay-screen active">
+      <div class="glass-card lobby-card">
+        <div class="brand-header">
+          <div class="brand-badge">TWO-DEVICE REALTIME MULTIPLAYER</div>
+          <h1 class="game-title">FEATHER<span>LINE</span></h1>
+          <p class="game-subtitle">Guided Serves • Feather Arrow Tracking • Play on Separate Screens</p>
+        </div>
+
+        <!-- Player Customization Profile -->
+        <div class="profile-card">
+          <div class="profile-row">
+            <div class="input-field">
+              <label for="player-name-input">Your Display Name</label>
+              <input type="text" id="player-name-input" maxlength="12" value="Player 1" placeholder="Enter your name">
+            </div>
+            <label class="toggle-control" title="Wider racket reach (+45%) and forgiving hit timing">
+              <input type="checkbox" id="player-assist-toggle">
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">🛡️ Reach Assist</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Game Mode Selection Tabs -->
+        <div class="mode-tab-group">
+          <button class="mode-tab active" id="btn-mode-vs">
+            <span class="tab-icon">⚔️</span>
+            <div class="tab-text">
+              <strong>VS Match</strong>
+              <small>First to 11 (Win by 2)</small>
+            </div>
+          </button>
+          <button class="mode-tab" id="btn-mode-coop">
+            <span class="tab-icon">🤝</span>
+            <div class="tab-text">
+              <strong>Co-Op Rally</strong>
+              <small>Endless Streak • Milestones</small>
+            </div>
+          </button>
+        </div>
+
+        <!-- Two-Device Lobby Actions -->
+        <div class="lobby-grid">
+          <!-- Card 1: Host Room -->
+          <div class="lobby-card-box host-box">
+            <div class="card-box-header">
+              <span class="box-icon">📡</span>
+              <h3>Create Room (Player 1)</h3>
+            </div>
+            <p class="box-desc">Generate a short 5-character code or copyable invite link for your partner.</p>
+            <button class="btn-primary" id="btn-create-room">GENERATE ROOM CODE</button>
+
+            <!-- Room Created Details Box -->
+            <div id="host-room-box" class="host-details-box hidden">
+              <div class="code-banner">
+                <span class="code-label">ROOM CODE</span>
+                <span id="room-code-display" class="room-code">XXXXX</span>
+              </div>
+              <div class="link-actions">
+                <button class="btn-secondary copy-btn" id="btn-copy-link">📋 Copy Invite Link</button>
+                <span id="copy-feedback" class="copy-toast hidden">Copied to clipboard!</span>
+              </div>
+              <p id="waiting-partner-msg" class="waiting-text">Share code with Player 2. Waiting...</p>
+              <button class="btn-primary accent-btn hidden" id="btn-start-host-match">START MATCH NOW</button>
+            </div>
+          </div>
+
+          <!-- Card 2: Join Room -->
+          <div class="lobby-card-box join-box" id="join-room-card">
+            <div class="card-box-header">
+              <span class="box-icon">🔗</span>
+              <h3>Join Room (Player 2)</h3>
+            </div>
+            <p class="box-desc">Enter the 5-character code sent by Player 1 to jump into the court.</p>
+            <div class="join-input-group">
+              <input type="text" id="join-code-input" maxlength="5" placeholder="CODE" autocomplete="off" autocapitalize="characters">
+              <button class="btn-primary" id="btn-join-room">JOIN MATCH</button>
+            </div>
+            <div class="solo-divider"><span>OR</span></div>
+            <button class="btn-secondary solo-btn" id="btn-solo-practice">🤖 Solo Practice (Offline)</button>
+          </div>
+        </div>
+
+        <!-- Controls Guide -->
+        <div class="controls-guide">
+          <div class="controls-column">
+            <h4>💻 Laptop Controls (Full Screen)</h4>
+            <div class="key-row"><span class="kbd">A</span> / <span class="kbd">D</span> or <span class="kbd">◀</span> <span class="kbd">▶</span> Move & Aim Serve</div>
+            <div class="key-row"><span class="kbd">W</span> or <span class="kbd">▲</span> Jump</div>
+            <div class="key-row"><span class="kbd">S</span> / <span class="kbd">▼</span> / <span class="kbd">Space</span> Launch Serve / Smash</div>
+            <div class="key-row"><span class="kbd">E</span> / <span class="kbd">Shift</span> / <span class="kbd">/</span> Defensive Lob</div>
+          </div>
+          <div class="controls-column">
+            <h4>📱 Mobile Controls (Full Screen)</h4>
+            <div class="key-row"><strong>Left Thumb:</strong> <kbd>◀</kbd> <kbd>▶</kbd> move & aim serve</div>
+            <div class="key-row"><strong>Right Thumb:</strong> <kbd>JUMP</kbd>, <kbd>HIT</kbd> (serve/smash), <kbd>LOB</kbd></div>
+            <div class="key-row">Hold move while jumping & smashing with multi-touch!</div>
+          </div>
+        </div>
+
+        <!-- Footer Tech Badge -->
+        <footer class="menu-footer">
+          <span class="tech-badge">⚡ FeatherLine • WebRTC DataChannel • HTML5 Canvas</span>
+          <span class="dot">•</span>
+          <span class="speed-hint">Airborne + Hit above net = Jump Smash!</span>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Pause Menu Overlay -->
+    <div id="pause-menu" class="overlay-screen hidden">
+      <div class="glass-card dialog-card">
+        <h2 class="dialog-title">GAME PAUSED</h2>
+        <div class="dialog-actions">
+          <button id="btn-resume" class="btn-primary">RESUME MATCH</button>
+          <button id="btn-quit-pause" class="btn-secondary">LOBBY / MENU</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Game Over Summary Screen -->
+    <div id="game-over-screen" class="overlay-screen hidden">
+      <div class="glass-card summary-card">
+        <div class="trophy-icon" id="summary-trophy-icon">🏆</div>
+        <div class="winner-label" id="winner-tag">CHAMPION!</div>
+        <h2 class="winner-title" id="winner-text">PLAYER 1 WINS</h2>
+        
+        <!-- VS Mode Result Box -->
+        <div class="final-score-box" id="vs-summary-scorebox">
+          <div class="player-score-col">
+            <span class="player-label" id="summary-p1-label">Player 1</span>
+            <span class="score-large" id="summary-p1-score">11</span>
+          </div>
+          <div class="score-dash">-</div>
+          <div class="player-score-col">
+            <span class="player-label" id="summary-p2-label">Player 2</span>
+            <span class="score-large" id="summary-p2-score">8</span>
+          </div>
+        </div>
+
+        <!-- Co-Op Mode Result Box -->
+        <div class="coop-summary-scorebox hidden" id="coop-summary-scorebox">
+          <div class="coop-result-col">
+            <span class="coop-result-label">FINAL STREAK</span>
+            <span class="coop-result-large" id="summary-coop-final">28</span>
+          </div>
+          <div class="coop-result-divider"></div>
+          <div class="coop-result-col">
+            <span class="coop-result-label">BEST RECORD</span>
+            <span class="coop-result-large highlight-val" id="summary-coop-best">34</span>
+          </div>
+        </div>
+
+        <!-- Match Stats Grid -->
+        <div class="match-stats-grid">
+          <div class="stat-item">
+            <span class="stat-value" id="stat-longest-rally">14</span>
+            <span class="stat-name" id="stat-rally-label">Longest Rally</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="stat-total-smashes">9</span>
+            <span class="stat-name">Smashes Landed</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="stat-match-time">02:18</span>
+            <span class="stat-name">Match Time</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="stat-total-points">19</span>
+            <span class="stat-name" id="stat-points-label">Points Scored</span>
+          </div>
+        </div>
+
+        <!-- Actions: Rematch, Swap Sides, Main Menu -->
+        <div class="summary-actions-grid">
+          <button id="btn-rematch" class="btn-primary highlight-btn">🔄 REMATCH</button>
+          <button id="btn-swap-sides" class="btn-secondary" title="Swap sides and configurations across both devices">⇄ SWAP SIDES</button>
+          <button id="btn-menu" class="btn-secondary">🏠 LOBBY</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Full-Screen Per-Device Touch Controls (Left-Thumb Movement & Right-Thumb Actions) -->
+    <div id="touch-controls" class="touch-layer hidden">
+      <!-- Left-Thumb Movement Zone -->
+      <div class="touch-zone left-zone">
+        <div class="dpad-group">
+          <button class="t-btn t-dpad" id="t-move-left" data-key="move-left" aria-label="Move Left">◀</button>
+          <button class="t-btn t-dpad" id="t-move-right" data-key="move-right" aria-label="Move Right">▶</button>
+        </div>
+      </div>
+
+      <!-- Right-Thumb Action Zone -->
+      <div class="touch-zone right-zone">
+        <div class="actions-group">
+          <button class="t-btn t-action jump-btn" id="t-jump" data-key="jump" aria-label="Jump">JUMP</button>
+          <div class="sub-actions">
+            <button class="t-btn t-action lob-btn" id="t-lob" data-key="lob" aria-label="Lob">LOB</button>
+            <button class="t-btn t-action hit-btn" id="t-hit" data-key="hit" aria-label="Hit / Smash / Serve">HIT</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mobile Portrait Orientation Warning Overlay -->
+    <div id="orientation-warning" class="orientation-overlay hidden">
+      <div class="rotate-phone-icon">
+        <div class="phone-shape"></div>
+      </div>
+      <h2>PLEASE ROTATE YOUR DEVICE</h2>
+      <p>FeatherLine is optimized for landscape full-screen play. Turn your screen sideways to begin.</p>
+    </div>
+  </div>
+
+  <!-- Game ES Module Entry Point -->
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
