@@ -57,6 +57,12 @@ export class Player {
 
     // Guided Serve Timing Ring
     this.serveTimingPhase = 0;
+
+    // Aim Target (Mouse / Tap Coordinates)
+    this.aimX = this.side === 1 ? 920 : 360;
+    this.aimY = 480;
+    this.lastMissTimer = 0;
+    this.autoHitCooldown = 0;
   }
 
   jump(physicsEngine) {
@@ -82,6 +88,18 @@ export class Player {
   update(dt, inputState, physicsEngine) {
     this.animTime += dt;
     this.serveTimingPhase = (this.serveTimingPhase + dt * 2.8) % (Math.PI * 2);
+
+    if (inputState && inputState.aimX !== undefined) {
+      this.aimX = inputState.aimX;
+      this.aimY = inputState.aimY;
+    }
+
+    if (this.lastMissTimer > 0) {
+      this.lastMissTimer = Math.max(0, this.lastMissTimer - dt);
+    }
+    if (this.autoHitCooldown > 0) {
+      this.autoHitCooldown = Math.max(0, this.autoHitCooldown - dt);
+    }
 
     let moveDir = 0;
     if (inputState.left) moveDir -= 1;
@@ -159,6 +177,8 @@ export class Player {
     this.facing = remoteData.facing || (this.side === 1 ? 1 : -1);
     this.assistBoost = remoteData.assistBoost;
     this.smashesLanded = remoteData.smashesLanded || 0;
+    if (remoteData.aimX !== undefined) this.aimX = remoteData.aimX;
+    if (remoteData.aimY !== undefined) this.aimY = remoteData.aimY;
     if (remoteData.name) this.name = remoteData.name;
 
     this.animTime += dt;
@@ -183,6 +203,8 @@ export class Player {
       facing: this.facing,
       assistBoost: this.assistBoost,
       smashesLanded: this.smashesLanded,
+      aimX: Math.round(this.aimX),
+      aimY: Math.round(this.aimY),
       name: this.name,
       side: this.side
     };
@@ -197,41 +219,113 @@ export class Player {
     return { x: reachX, y: reachY, radius };
   }
 
-  // Calculate guided serve launch parameters based on player position and timing ring
+  // Calculate dynamic launch parameters targeting (aimX, aimY)
+  calculateTargetedVelocity(shuttlecock, aimX, aimY, forcedType = null) {
+    const dir = this.side === 1 ? 1 : -1;
+    let targetX = aimX;
+    if (this.side === 1) {
+      targetX = Math.max(COURT.netX + 35, Math.min(COURT.rightBound + 10, targetX));
+    } else {
+      targetX = Math.max(COURT.leftBound - 10, Math.min(COURT.netX - 35, targetX));
+    }
+    const targetY = Math.max(140, Math.min(COURT.floorY - 10, aimY));
+
+    const isAirborne = !this.isGrounded;
+    const isAboveNet = shuttlecock.y < COURT.netTopY + 30;
+    const isSmashAim = targetY > COURT.netTopY;
+    const isJumpSmash = (forcedType === 'hit' || !forcedType) && isAirborne && isAboveNet && isSmashAim;
+
+    const distToNet = Math.abs(COURT.netX - shuttlecock.x);
+    const targetDistFromNet = Math.abs(targetX - COURT.netX);
+    const isDrop = forcedType === 'drop' || (!forcedType && !isJumpSmash && targetDistFromNet < 190 && targetY > 380);
+    const isLob = forcedType === 'lob' || (!forcedType && !isJumpSmash && (targetY < 260 || (this.side === 1 ? targetX > COURT.rightBound - 110 : targetX < COURT.leftBound + 110)));
+
+    if (isJumpSmash) {
+      const dx = targetX - shuttlecock.x;
+      const dy = targetY - shuttlecock.y;
+      let angle = Math.atan2(dy, dx);
+
+      // Verify that smash trajectory clears the net tape
+      const netT = (COURT.netX - shuttlecock.x) / (Math.cos(angle) * 980);
+      if (netT > 0) {
+        const crossingY = shuttlecock.y + Math.sin(angle) * 980 * netT;
+        if (crossingY > COURT.netTopY - 12) {
+          angle = Math.atan2((COURT.netTopY - 18) - shuttlecock.y, COURT.netX - shuttlecock.x);
+        }
+      }
+
+      const speed = 980 + Math.random() * 50;
+      const vx = Math.cos(angle) * speed;
+      const vy = Math.sin(angle) * speed;
+      return { vx, vy, isJumpSmash: true, shotType: 'smash' };
+    }
+
+    if (isDrop) {
+      const vx = dir * (410 + (targetDistFromNet / 200) * 80);
+      const vy = -335;
+      return { vx, vy, isJumpSmash: false, shotType: 'drop' };
+    }
+
+    if (isLob) {
+      const totalDist = Math.abs(targetX - shuttlecock.x);
+      const vx = dir * (560 + (totalDist / 800) * 140);
+      const vy = -780 - Math.min(80, (COURT.floorY - targetY) * 0.2);
+      return { vx, vy, isJumpSmash: false, shotType: 'lob' };
+    }
+
+    // Default: Targeted drive
+    const totalDist = Math.abs(targetX - shuttlecock.x);
+    const vx = dir * (710 + (totalDist / 800) * 140);
+    const tNet = distToNet / Math.abs(vx);
+    const desiredNetY = 412; // 43px clearance above net tape
+    let vy = (desiredNetY - shuttlecock.y - 0.5 * COURT.gravity * tNet * tNet) / tNet;
+    vy = Math.max(-520, Math.min(-200, vy));
+
+    return { vx, vy, isJumpSmash: false, shotType: 'drive' };
+  }
+
+  // Calculate guided serve launch parameters based on aim target and timing ring
   getServeParameters(type = 'drive') {
     const dir = this.side === 1 ? 1 : -1;
-    // Aiming factor: closer to net = steeper angle, further back = flatter drive
-    const netDist = Math.abs(COURT.netX - this.x);
-    const aimRatio = Math.max(0.2, Math.min(1.0, (netDist - 50) / 400));
+    let targetX = this.aimX;
+    if (this.side === 1) {
+      targetX = Math.max(COURT.netX + 80, Math.min(COURT.rightBound - 40, targetX));
+    } else {
+      targetX = Math.max(COURT.leftBound + 40, Math.min(COURT.netX - 80, targetX));
+    }
 
-    // Timing ring precision bonus: when sine is at top peak (scale ~ 1.0)
     const timingBonus = Math.abs(Math.sin(this.serveTimingPhase)) > 0.85;
+    const distToNet = Math.abs(COURT.netX - this.x);
+    const totalDist = Math.abs(targetX - this.x);
 
     let vx, vy;
     if (type === 'lob') {
-      vx = dir * (580 + aimRatio * 120);
-      vy = -740;
+      vx = dir * (560 + (totalDist / 800) * 120);
+      vy = -750;
     } else {
-      vx = dir * (680 + (timingBonus ? 80 : 0) + aimRatio * 90);
-      vy = -(320 + (1 - aimRatio) * 60);
+      vx = dir * (620 + (totalDist / 600) * 150 + (timingBonus ? 60 : 0));
+      const tNet = distToNet / Math.abs(vx);
+      const desiredNetY = 405;
+      vy = (desiredNetY - (this.y + 36) - 0.5 * COURT.gravity * tNet * tNet) / tNet;
+      vy = Math.max(-480, Math.min(-240, vy));
     }
 
-    return { vx, vy, isPerfect: timingBonus };
+    return { vx, vy, isPerfect: timingBonus, targetX };
   }
 
-  // Draw Guided Serve Preview Arc & Timing Ring
+  // Draw Guided Serve Preview Arc, Aim Crosshair & Timing Ring
   drawServeGuide(ctx, shuttlecock, isLocalServer = true) {
     const serveParams = this.getServeParameters('drive');
     const startX = shuttlecock.x;
     const startY = shuttlecock.y;
 
     // Predict landing arc points
-    const points = predictTrajectory(startX, startY, serveParams.vx, serveParams.vy, false, 24, 0.038);
+    const points = predictTrajectory(startX, startY, serveParams.vx, serveParams.vy, false, 26, 0.038);
 
     if (points.length > 1) {
       ctx.save();
       // 1. Dotted Trajectory Arc
-      ctx.strokeStyle = this.side === 1 ? 'rgba(0, 242, 254, 0.65)' : 'rgba(255, 65, 108, 0.65)';
+      ctx.strokeStyle = this.side === 1 ? 'rgba(0, 242, 254, 0.75)' : 'rgba(255, 65, 108, 0.75)';
       ctx.lineWidth = 2.5;
       ctx.setLineDash([6, 6]);
       ctx.beginPath();
@@ -248,19 +342,19 @@ export class Player {
       ctx.lineWidth = 2;
       ctx.setLineDash([]);
       ctx.beginPath();
-      ctx.ellipse(landingPt.x, COURT.floorY - 2, 24, 8, 0, 0, Math.PI * 2);
+      ctx.ellipse(landingPt.x, COURT.floorY - 2, 26, 8, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
 
       // Target Crosshair
       ctx.beginPath();
-      ctx.moveTo(landingPt.x - 12, COURT.floorY - 2);
-      ctx.lineTo(landingPt.x + 12, COURT.floorY - 2);
+      ctx.moveTo(landingPt.x - 14, COURT.floorY - 2);
+      ctx.lineTo(landingPt.x + 14, COURT.floorY - 2);
       ctx.stroke();
       ctx.restore();
     }
 
-    // 3. Subtle Timing Ring around Shuttlecock for extra pace
+    // 3. Timing Ring around Shuttlecock
     ctx.save();
     const ringScale = 1.0 + Math.abs(Math.sin(this.serveTimingPhase)) * 0.9;
     const isSweetSpot = ringScale > 1.65;
@@ -274,12 +368,12 @@ export class Player {
     // 4. Guided Serve Control Hint
     if (isLocalServer) {
       ctx.save();
-      ctx.fillStyle = 'rgba(10, 16, 28, 0.85)';
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+      ctx.fillStyle = 'rgba(10, 16, 28, 0.88)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
       ctx.lineWidth = 1;
       const hintY = this.y - 32;
       ctx.beginPath();
-      ctx.roundRect(this.x - 84, hintY, 168, 24, 12);
+      ctx.roundRect(this.x - 96, hintY, 192, 24, 12);
       ctx.fill();
       ctx.stroke();
 
@@ -287,77 +381,181 @@ export class Player {
       ctx.fillStyle = '#f8fafc';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('Tap HIT to serve • Move to aim', this.x, hintY + 12);
+      ctx.fillText('Tap / Mouse on Court to Aim & Serve', this.x, hintY + 12);
       ctx.restore();
     }
   }
 
+  // Auto-Hit Check: Automatically hit when standing accurately in position, miss otherwise
+  checkAutoHit(shuttlecock, physicsEngine, audioEngine, isCoop = false) {
+    if (!shuttlecock.inPlay || shuttlecock.lastHitBy === this.side) return false;
+    if (this.autoHitCooldown > 0) return false;
+
+    // Must be in or approaching player side
+    const isOnMySide = this.side === 1 ? (shuttlecock.x < COURT.netX + 25) : (shuttlecock.x > COURT.netX - 25);
+    if (!isOnMySide) return false;
+
+    // Must not be already on the floor
+    if (shuttlecock.y >= COURT.floorY - 8) return false;
+
+    const racket = this.getRacketHitCenter();
+    const dist = Math.hypot(shuttlecock.x - racket.x, shuttlecock.y - racket.y);
+    const hitRadius = racket.radius + shuttlecock.radius;
+
+    // 1. In accurate position -> AUTO HIT!
+    if (dist <= hitRadius) {
+      this.autoHitCooldown = 0.22;
+      const shot = this.calculateTargetedVelocity(shuttlecock, this.aimX, this.aimY);
+      this.swing(shot.isJumpSmash ? 'hit' : shot.shotType);
+      this.hasConnectedHit = true;
+
+      if (shot.isJumpSmash) {
+        this.smashesLanded++;
+        physicsEngine.createSmashTrail(shuttlecock.x, shuttlecock.y, shot.vx, shot.vy);
+        physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 24, '#ffaa00');
+        physicsEngine.triggerHitStop(0.030);
+        physicsEngine.addScreenShake(9);
+        audioEngine.playSmash();
+      } else if (shot.shotType === 'lob') {
+        physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 10, '#00f2fe');
+        audioEngine.playHit(0.9);
+      } else if (shot.shotType === 'drop') {
+        physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 8, '#38bdf8');
+        audioEngine.playHit(1.2);
+      } else {
+        physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 12, this.side === 1 ? '#00f2fe' : '#ff416c');
+        audioEngine.playHit(1.0);
+      }
+
+      shuttlecock.launch(shot.vx, shot.vy, this.side, shot.isJumpSmash);
+      return { hit: true, isJumpSmash: shot.isJumpSmash, shotType: shot.shotType };
+    }
+
+    // 2. Not standing accurately -> Miss!
+    if (dist < hitRadius + 65 && shuttlecock.vy > 0 && shuttlecock.y > racket.y - 15) {
+      if (this.lastMissTimer === 0) {
+        this.lastMissTimer = 0.85;
+        if (physicsEngine) {
+          physicsEngine.createHitSparks(racket.x, racket.y, 4, 'rgba(255, 255, 255, 0.35)');
+        }
+      }
+    }
+
+    return false;
+  }
+
+  // Manual Hit Check (Override)
   checkHit(shuttlecock, physicsEngine, audioEngine, isCoop = false) {
     if (this.swingState !== 'swinging' || this.hasConnectedHit) return false;
 
     const racket = this.getRacketHitCenter();
     const dist = Math.hypot(shuttlecock.x - racket.x, shuttlecock.y - racket.y);
+    const hitRadius = racket.radius + shuttlecock.radius;
 
-    if (dist <= racket.radius + shuttlecock.radius) {
+    if (dist <= hitRadius) {
       this.hasConnectedHit = true;
+      const shot = this.calculateTargetedVelocity(shuttlecock, this.aimX, this.aimY, this.swingType);
 
-      const isAirborne = !this.isGrounded;
-      const isAboveNet = shuttlecock.y < COURT.netTopY + 30;
-      const isJumpSmash = isAirborne && isAboveNet && this.swingType === 'hit';
-      const isDropShot = this.swingType === 'drop' || (this.swingType === 'hit' && this.isGrounded && Math.abs(this.x - COURT.netX) < 220 && shuttlecock.y < COURT.netTopY + 50);
-
-      let outVx, outVy;
-      const targetSideDir = this.side === 1 ? 1 : -1;
-
-      if (isJumpSmash) {
+      if (shot.isJumpSmash) {
         this.smashesLanded++;
-
-        if (isCoop) {
-          outVx = targetSideDir * (840 + Math.random() * 60);
-          outVy = 260 + Math.random() * 50;
-        } else {
-          outVx = targetSideDir * (940 + Math.random() * 80);
-          outVy = 380 + Math.random() * 60;
-        }
-
-        physicsEngine.createSmashTrail(shuttlecock.x, shuttlecock.y, outVx, outVy);
+        physicsEngine.createSmashTrail(shuttlecock.x, shuttlecock.y, shot.vx, shot.vy);
         physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 24, '#ffaa00');
-        physicsEngine.triggerHitStop(0.030); // 30ms hit-stop
+        physicsEngine.triggerHitStop(0.030);
         physicsEngine.addScreenShake(9);
         audioEngine.playSmash();
-
-        shuttlecock.launch(outVx, outVy, this.side, true);
-      } else if (this.swingType === 'lob') {
-        outVx = targetSideDir * (600 + Math.random() * 40);
-        outVy = -(780 + Math.random() * 60);
-
+      } else if (shot.shotType === 'lob') {
         physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 10, '#00f2fe');
         audioEngine.playHit(0.9);
-
-        shuttlecock.launch(outVx, outVy, this.side, false);
-      } else if (isDropShot) {
-        outVx = targetSideDir * (460 + Math.random() * 30) + this.vx * 0.2;
-        outVy = -(310 + Math.random() * 30);
-
+      } else if (shot.shotType === 'drop') {
         physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 8, '#38bdf8');
-        audioEngine.playHit(1.25);
-
-        shuttlecock.launch(outVx, outVy, this.side, false);
-        return { hit: true, isJumpSmash: false, isDropShot: true, swingType: 'drop' };
+        audioEngine.playHit(1.2);
       } else {
-        outVx = targetSideDir * (740 + Math.random() * 50);
-        outVy = -(240 + Math.random() * 80);
-
-        physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 12, '#ffffff');
+        physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 12, this.side === 1 ? '#00f2fe' : '#ff416c');
         audioEngine.playHit(1.0);
-
-        shuttlecock.launch(outVx, outVy, this.side, false);
       }
 
-      return { hit: true, isJumpSmash, swingType: this.swingType };
+      shuttlecock.launch(shot.vx, shot.vy, this.side, shot.isJumpSmash);
+      return { hit: true, isJumpSmash: shot.isJumpSmash, shotType: shot.shotType };
     }
 
     return false;
+  }
+
+  // Render Aim Reticle & Target Indicator on Court
+  drawAimTarget(ctx, isLocalPlayer = true) {
+    let targetX = this.aimX;
+    if (this.side === 1) {
+      targetX = Math.max(COURT.netX + 35, Math.min(COURT.rightBound + 10, targetX));
+    } else {
+      targetX = Math.max(COURT.leftBound - 10, Math.min(COURT.netX - 35, targetX));
+    }
+    const targetY = Math.max(140, Math.min(COURT.floorY - 10, this.aimY));
+    const color = this.side === 1 ? '#00f2fe' : '#ff416c';
+    const bgAlpha = this.side === 1 ? 'rgba(0, 242, 254, 0.2)' : 'rgba(255, 65, 108, 0.2)';
+
+    ctx.save();
+
+    // 1. Dotted aim line from racket to target
+    const racket = this.getRacketHitCenter();
+    ctx.strokeStyle = this.side === 1 ? 'rgba(0, 242, 254, 0.35)' : 'rgba(255, 65, 108, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 6]);
+    ctx.beginPath();
+    ctx.moveTo(racket.x, racket.y);
+    ctx.lineTo(targetX, targetY);
+    ctx.stroke();
+
+    // 2. Glowing Reticle Circle
+    ctx.setLineDash([]);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = bgAlpha;
+    ctx.lineWidth = 2;
+
+    const pulse = Math.sin(this.animTime * 6) * 3;
+    ctx.beginPath();
+    ctx.arc(targetX, targetY, 18 + pulse, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Reticle crosshair ticks
+    ctx.beginPath();
+    ctx.moveTo(targetX - 24, targetY);
+    ctx.lineTo(targetX - 10, targetY);
+    ctx.moveTo(targetX + 10, targetY);
+    ctx.lineTo(targetX + 24, targetY);
+    ctx.moveTo(targetX, targetY - 24);
+    ctx.lineTo(targetX, targetY - 10);
+    ctx.moveTo(targetX, targetY + 10);
+    ctx.lineTo(targetX, targetY + 24);
+    ctx.stroke();
+
+    // Floor shadow ellipse
+    ctx.fillStyle = this.side === 1 ? 'rgba(0, 242, 254, 0.15)' : 'rgba(255, 65, 108, 0.15)';
+    ctx.beginPath();
+    ctx.ellipse(targetX, COURT.floorY - 2, 24, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 3. Aim Text Badge
+    if (isLocalPlayer) {
+      ctx.font = 'bold 10px Outfit, sans-serif';
+      ctx.fillStyle = color;
+      ctx.textAlign = 'center';
+      ctx.fillText('AIM TARGET', targetX, targetY - 26);
+    }
+
+    // 4. "MISSED!" feedback if standing incorrectly
+    if (this.lastMissTimer > 0) {
+      const alpha = Math.min(1.0, this.lastMissTimer / 0.35);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#f43f5e';
+      ctx.font = 'bold 13px Outfit, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('MISSED! Out of reach', this.x, this.y - 36);
+      ctx.restore();
+    }
+
+    ctx.restore();
   }
 
   draw(ctx) {
@@ -511,7 +709,20 @@ export class AIController {
 
   update(dt, shuttlecock) {
     this.reactionTimer += dt;
-    const input = { left: false, right: false, jump: false, swing: false, swingType: 'hit' };
+    const targetAimX = this.player.side === 2
+      ? (COURT.leftBound + 80 + Math.random() * 360)
+      : (COURT.netX + 80 + Math.random() * 360);
+    const targetAimY = COURT.floorY - 60 - Math.random() * 120;
+
+    const input = {
+      left: false,
+      right: false,
+      jump: false,
+      swing: false,
+      swingType: 'hit',
+      aimX: targetAimX,
+      aimY: targetAimY
+    };
 
     if (!shuttlecock.inPlay && shuttlecock.lastHitBy === this.player.side) {
       if (this.reactionTimer > 1.0) {

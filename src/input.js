@@ -10,9 +10,14 @@ export class InputManager {
       right: false,
       jump: false,
       swing: false,
-      swingType: 'hit', // 'hit' or 'lob'
+      swingType: 'hit', // 'hit', 'lob', or 'drop'
       jumpPressedThisFrame: false,
       swingPressedThisFrame: false,
+      pointerDownThisFrame: false,
+      aimX: 940, // Default aim coordinate on opponent court
+      aimY: 480,
+      aimActive: false,
+      isTouchAim: false,
     };
 
     this.keysDown = new Set();
@@ -25,6 +30,7 @@ export class InputManager {
 
     this.initKeyboard();
     this.initTouchControls();
+    this.initPointerAim();
   }
 
   initKeyboard() {
@@ -225,9 +231,78 @@ export class InputManager {
     return this.touchControlsVisible;
   }
 
+  getCanvasCoordinates(clientX, clientY) {
+    const canvas = document.getElementById('game-canvas');
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const scaleX = 1280 / rect.width;
+    const scaleY = 720 / rect.height;
+    const x = Math.max(50, Math.min(1230, (clientX - rect.left) * scaleX));
+    const y = Math.max(80, Math.min(620, (clientY - rect.top) * scaleY));
+    return { x, y };
+  }
+
+  initPointerAim() {
+    // 1. Laptop / Desktop: Mouse Aiming
+    window.addEventListener('mousemove', (e) => {
+      // If user is interacting with HTML overlay screens, don't hijack
+      const target = e.target;
+      if (target && target.closest('.glass-card, .hud-layer button, .hud-layer input')) {
+        return;
+      }
+      const coords = this.getCanvasCoordinates(e.clientX, e.clientY);
+      if (coords) {
+        this.state.aimX = Math.round(coords.x);
+        this.state.aimY = Math.round(coords.y);
+        this.state.aimActive = true;
+        this.state.isTouchAim = false;
+      }
+    });
+
+    window.addEventListener('mousedown', (e) => {
+      const target = e.target;
+      if (target && target.closest('.glass-card, .hud-layer, .t-btn')) {
+        return;
+      }
+      const coords = this.getCanvasCoordinates(e.clientX, e.clientY);
+      if (coords) {
+        this.state.aimX = Math.round(coords.x);
+        this.state.aimY = Math.round(coords.y);
+        this.state.aimActive = true;
+        this.state.pointerDownThisFrame = true;
+      }
+    });
+
+    // 2. Mobile / Tablet: Tap Aiming
+    const handleTouchAim = (e) => {
+      for (let i = 0; i < e.touches.length; i++) {
+        const touch = e.touches[i];
+        const elem = document.elementFromPoint(touch.clientX, touch.clientY);
+        // Ignore if touching on-screen D-pad or action buttons
+        if (elem && elem.closest('.t-btn, .glass-card, .hud-layer')) {
+          continue;
+        }
+        const coords = this.getCanvasCoordinates(touch.clientX, touch.clientY);
+        if (coords) {
+          this.state.aimX = Math.round(coords.x);
+          this.state.aimY = Math.round(coords.y);
+          this.state.aimActive = true;
+          this.state.isTouchAim = true;
+          this.state.pointerDownThisFrame = true;
+          break;
+        }
+      }
+    };
+
+    window.addEventListener('touchstart', handleTouchAim, { passive: true });
+    window.addEventListener('touchmove', handleTouchAim, { passive: true });
+  }
+
   clearFrameFlags() {
     this.state.jumpPressedThisFrame = false;
     this.state.swingPressedThisFrame = false;
+    this.state.pointerDownThisFrame = false;
   }
 
   clearFrameTriggers() {

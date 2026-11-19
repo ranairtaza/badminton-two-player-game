@@ -712,8 +712,12 @@ class FeatherLineGame {
     this.p2.reset();
 
     if (servingSide === 1) {
+      this.p1.aimX = 940;
+      this.p1.aimY = 480;
       this.shuttlecock.reset(this.p1.x + 36, this.p1.y + 40, 1);
     } else {
+      this.p2.aimX = 340;
+      this.p2.aimY = 480;
       this.shuttlecock.reset(this.p2.x - 36, this.p2.y + 40, 2);
     }
 
@@ -955,7 +959,9 @@ class FeatherLineGame {
           right: input.state.right,
           jump: input.state.jumpPressedThisFrame || input.state.jump,
           swing: input.state.swingPressedThisFrame,
-          swingType: input.state.swingType
+          swingType: input.state.swingType,
+          aimX: input.state.aimX,
+          aimY: input.state.aimY
         }
       });
       input.clearFrameFlags();
@@ -993,16 +999,17 @@ class FeatherLineGame {
     if (this.gameState === 'SERVE') {
       this.serveTimer += dt;
 
-      // Allow aiming by moving Left/Right
-      this.p1.update(dt, { left: p1Input.left, right: p1Input.right }, this.physics);
-      this.p2.update(dt, { left: p2Input.left, right: p2Input.right }, this.physics);
+      // Allow aiming by moving Left/Right and aiming with mouse/tap
+      this.p1.update(dt, { left: p1Input.left, right: p1Input.right, aimX: p1Input.aimX, aimY: p1Input.aimY }, this.physics);
+      this.p2.update(dt, { left: p2Input.left, right: p2Input.right, aimX: p2Input.aimX, aimY: p2Input.aimY }, this.physics);
 
       if (this.serverSide === 1) {
         this.shuttlecock.x = this.p1.x + 36;
         this.shuttlecock.y = this.p1.y + 36;
 
-        // Press HIT (S / Space / Down / Touch HIT) to serve cleanly
-        if (p1WantsSwing || this.serveTimer > 4.5) {
+        // Launch serve on HIT key, touch button, or mouse click / court tap
+        const p1ServeTrigger = p1WantsSwing || (network.role !== 'GUEST' && input.state.pointerDownThisFrame);
+        if (p1ServeTrigger || this.serveTimer > 4.5) {
           const params = this.p1.getServeParameters(p1Input.swingType || 'drive');
           this.p1.swing(p1Input.swingType || 'hit');
           this.launchServe(1, params);
@@ -1011,7 +1018,8 @@ class FeatherLineGame {
         this.shuttlecock.x = this.p2.x - 36;
         this.shuttlecock.y = this.p2.y + 36;
 
-        if (p2WantsSwing || this.serveTimer > 4.5) {
+        const p2ServeTrigger = p2WantsSwing || (network.role === 'SOLO' && this.soloSwapped && input.state.pointerDownThisFrame);
+        if (p2ServeTrigger || this.serveTimer > 4.5) {
           const params = this.p2.getServeParameters(p2Input.swingType || 'drive');
           this.p2.swing(p2Input.swingType || 'hit');
           this.launchServe(2, params);
@@ -1040,26 +1048,54 @@ class FeatherLineGame {
 
       const isCoop = this.mode === 'coop';
 
-      const p1HitRes = this.p1.checkHit(this.shuttlecock, this.physics, audio, isCoop);
-      if (p1HitRes) {
+      // 1. AUTO-HIT: Automatically hits if player is standing in accurate position
+      const p1AutoHit = this.p1.checkAutoHit(this.shuttlecock, this.physics, audio, isCoop);
+      if (p1AutoHit) {
         this.matchStats.currentRally++;
         if (isCoop) {
           this.coopStreak++;
           this.checkCoopMilestone(this.coopStreak);
         }
-        network.send({ type: 'AUDIO', audioType: p1HitRes.isJumpSmash ? 'smash' : 'hit', power: 1.0 });
+        network.send({ type: 'AUDIO', audioType: p1AutoHit.isJumpSmash ? 'smash' : 'hit', power: 1.0 });
         this.updateHUD();
       }
 
-      const p2HitRes = this.p2.checkHit(this.shuttlecock, this.physics, audio, isCoop);
-      if (p2HitRes) {
+      const p2AutoHit = this.p2.checkAutoHit(this.shuttlecock, this.physics, audio, isCoop);
+      if (p2AutoHit) {
         this.matchStats.currentRally++;
         if (isCoop) {
           this.coopStreak++;
           this.checkCoopMilestone(this.coopStreak);
         }
-        network.send({ type: 'AUDIO', audioType: p2HitRes.isJumpSmash ? 'smash' : 'hit', power: 1.0 });
+        network.send({ type: 'AUDIO', audioType: p2AutoHit.isJumpSmash ? 'smash' : 'hit', power: 1.0 });
         this.updateHUD();
+      }
+
+      // 2. MANUAL SWING OVERRIDE: If player also manually triggered swing
+      if (p1WantsSwing && !p1AutoHit) {
+        const p1HitRes = this.p1.checkHit(this.shuttlecock, this.physics, audio, isCoop);
+        if (p1HitRes) {
+          this.matchStats.currentRally++;
+          if (isCoop) {
+            this.coopStreak++;
+            this.checkCoopMilestone(this.coopStreak);
+          }
+          network.send({ type: 'AUDIO', audioType: p1HitRes.isJumpSmash ? 'smash' : 'hit', power: 1.0 });
+          this.updateHUD();
+        }
+      }
+
+      if (p2WantsSwing && !p2AutoHit) {
+        const p2HitRes = this.p2.checkHit(this.shuttlecock, this.physics, audio, isCoop);
+        if (p2HitRes) {
+          this.matchStats.currentRally++;
+          if (isCoop) {
+            this.coopStreak++;
+            this.checkCoopMilestone(this.coopStreak);
+          }
+          network.send({ type: 'AUDIO', audioType: p2HitRes.isJumpSmash ? 'smash' : 'hit', power: 1.0 });
+          this.updateHUD();
+        }
       }
 
       this.shuttlecock.update(
@@ -1155,6 +1191,18 @@ class FeatherLineGame {
         this.p1.drawServeGuide(this.ctx, this.shuttlecock, isLocalHost);
       } else {
         this.p2.drawServeGuide(this.ctx, this.shuttlecock, !isLocalHost);
+      }
+    } else if (this.gameState === 'PLAY') {
+      // Render interactive Aim Reticle & Dotted Direction Indicator on Court
+      const isLocalHost = network.role === 'HOST' || network.role === 'SOLO';
+      if (isLocalHost) {
+        if (network.role === 'SOLO' && this.soloSwapped) {
+          this.p2.drawAimTarget(this.ctx, true);
+        } else {
+          this.p1.drawAimTarget(this.ctx, true);
+        }
+      } else {
+        this.p2.drawAimTarget(this.ctx, true);
       }
     }
 

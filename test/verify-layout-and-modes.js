@@ -476,6 +476,72 @@ async function runTestSuite() {
 
     assert("Partner disconnect during active play triggers in-game alert overlay and pauses match", disconnectModal);
 
+    console.log('\n--- SUITE F: Tap/Mouse Aiming & Auto-Hit by Positioning ---');
+    // Test Mouse/Tap Aiming updates aim target
+    const aimCheck = await p1.evaluate(`(() => {
+      const g = window.game;
+      g.input.state.aimX = 850;
+      g.input.state.aimY = 400;
+      g.p1.update(0.016, g.input.state, g.physics);
+      return {
+        p1AimX: g.p1.aimX,
+        p1AimY: g.p1.aimY
+      };
+    })()`);
+    assert("Mouse/Tap coordinate updates player aim target", aimCheck.p1AimX === 850 && aimCheck.p1AimY === 400);
+
+    // Test Auto-Hit when standing in accurate position
+    const autoHitInPosition = await p1.evaluate(`(() => {
+      const g = window.game;
+      g.gameState = 'PLAY';
+      g.shuttlecock.inPlay = true;
+      g.shuttlecock.lastHitBy = 2; // Hit by opponent
+      g.p1.autoHitCooldown = 0;
+      g.p1.swingState = 'idle';
+
+      // Position shuttlecock exactly in front of P1 racket sweet-spot
+      const racket = g.p1.getRacketHitCenter();
+      g.shuttlecock.x = racket.x + 10;
+      g.shuttlecock.y = racket.y;
+      g.shuttlecock.vx = -400;
+      g.shuttlecock.vy = 200;
+
+      const hitResult = g.p1.checkAutoHit(g.shuttlecock, g.physics, { playHit: () => {}, playSmash: () => {} }, false);
+      return {
+        hitResult: Boolean(hitResult),
+        shuttleVx: g.shuttlecock.vx,
+        shuttleHitter: g.shuttlecock.lastHitBy,
+        playerSwung: g.p1.swingState === 'swinging'
+      };
+    })()`);
+    assert("Standing in right position automatically hits the shuttlecock", autoHitInPosition.hitResult && autoHitInPosition.shuttleVx > 0 && autoHitInPosition.shuttleHitter === 1);
+
+    // Test Miss when player is NOT standing accurately
+    const missOutOfPosition = await p1.evaluate(`(() => {
+      const g = window.game;
+      g.gameState = 'PLAY';
+      g.shuttlecock.inPlay = true;
+      g.shuttlecock.lastHitBy = 2; // Hit by opponent
+      g.p1.autoHitCooldown = 0;
+      g.p1.swingState = 'idle';
+      g.p1.lastMissTimer = 0;
+
+      // Position shuttlecock far away from P1 racket (out of reach)
+      const racket = g.p1.getRacketHitCenter();
+      g.shuttlecock.x = racket.x + 95; // Out of reach
+      g.shuttlecock.y = racket.y;
+      g.shuttlecock.vx = -400;
+      g.shuttlecock.vy = 200;
+
+      const hitResult = g.p1.checkAutoHit(g.shuttlecock, g.physics, { playHit: () => {}, playSmash: () => {} }, false);
+      return {
+        hitResult: Boolean(hitResult),
+        shuttleHitter: g.shuttlecock.lastHitBy,
+        missFlagged: g.p1.lastMissTimer > 0
+      };
+    })()`);
+    assert("Not standing accurately misses the shuttlecock", !missOutOfPosition.hitResult && missOutOfPosition.shuttleHitter === 2 && missOutOfPosition.missFlagged);
+
     // Cleanup page clients
     p1.close();
     p2.close();
