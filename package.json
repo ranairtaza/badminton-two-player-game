@@ -1,0 +1,13 @@
+{
+  "name": "featherline",
+  "version": "1.0.0",
+  "description": "FeatherLine Modern Arcade 2-Player Online Badminton",
+  "type": "module",
+  "scripts": {
+    "start": "node test/server.js",
+    "dev": "node test/server.js",
+    "test": "node test/verify-layout-and-modes.js"
+  },
+  "keywords": ["badminton", "arcade", "game", "webrtc"],
+  "license": "MIT"
+}

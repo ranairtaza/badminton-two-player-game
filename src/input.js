@@ -17,6 +17,8 @@ export class InputManager {
 
     this.keysDown = new Set();
     this.activeTouches = new Map(); // touchId -> buttonKey
+    this.wasSwingActive = false;
+    this.wasJumpActive = false;
 
     this.isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
     this.touchControlsVisible = this.isTouchDevice;
@@ -63,6 +65,9 @@ export class InputManager {
     // Lob: E OR Left/Right Shift OR Slash
     const lobKey = this.keysDown.has('KeyE') || this.keysDown.has('ShiftLeft') || this.keysDown.has('ShiftRight') || this.keysDown.has('Slash');
 
+    // Drop Shot: F OR X
+    const dropKey = this.keysDown.has('KeyF') || this.keysDown.has('KeyX');
+
     // Touch button bindings
     const touchLeft = this.hasTouch('move-left');
     const touchRight = this.hasTouch('move-right');
@@ -73,25 +78,31 @@ export class InputManager {
     const moveLeft = leftKey || touchLeft;
     const moveRight = rightKey || touchRight;
     const jump = jumpKey || touchJump;
+    const isSwingActive = hitKey || touchHit || lobKey || touchLob || dropKey;
 
-    if (jump && !this.state.jump) {
+    if (jump && !this.wasJumpActive) {
       this.state.jumpPressedThisFrame = true;
     }
+    this.wasJumpActive = jump;
 
-    if ((hitKey || touchHit || lobKey || touchLob) && !this.state.swing) {
+    if (isSwingActive && !this.wasSwingActive) {
       this.state.swingPressedThisFrame = true;
     }
+    this.wasSwingActive = isSwingActive;
 
     this.state.left = moveLeft;
     this.state.right = moveRight;
     this.state.jump = jump;
 
-    if (hitKey || touchHit) {
+    if (dropKey) {
       this.state.swing = true;
-      this.state.swingType = 'hit';
+      this.state.swingType = 'drop';
     } else if (lobKey || touchLob) {
       this.state.swing = true;
       this.state.swingType = 'lob';
+    } else if (hitKey || touchHit) {
+      this.state.swing = true;
+      this.state.swingType = 'hit';
     } else {
       this.state.swing = false;
     }
@@ -217,6 +228,10 @@ export class InputManager {
   clearFrameFlags() {
     this.state.jumpPressedThisFrame = false;
     this.state.swingPressedThisFrame = false;
+  }
+
+  clearFrameTriggers() {
+    this.clearFrameFlags();
   }
 }
 

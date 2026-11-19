@@ -91,8 +91,9 @@ export class Player {
       this.vx = moveDir * this.speed;
       this.facing = moveDir;
     } else {
-      this.vx *= 0.72;
-      if (Math.abs(this.vx) < 10) this.vx = 0;
+      const damping = Math.exp(-18 * dt);
+      this.vx *= damping;
+      if (Math.abs(this.vx) < 5) this.vx = 0;
     }
 
     this.x += this.vx * dt;
@@ -303,6 +304,7 @@ export class Player {
       const isAirborne = !this.isGrounded;
       const isAboveNet = shuttlecock.y < COURT.netTopY + 30;
       const isJumpSmash = isAirborne && isAboveNet && this.swingType === 'hit';
+      const isDropShot = this.swingType === 'drop' || (this.swingType === 'hit' && this.isGrounded && Math.abs(this.x - COURT.netX) < 220 && shuttlecock.y < COURT.netTopY + 50);
 
       let outVx, outVy;
       const targetSideDir = this.side === 1 ? 1 : -1;
@@ -333,6 +335,15 @@ export class Player {
         audioEngine.playHit(0.9);
 
         shuttlecock.launch(outVx, outVy, this.side, false);
+      } else if (isDropShot) {
+        outVx = targetSideDir * (460 + Math.random() * 30) + this.vx * 0.2;
+        outVy = -(310 + Math.random() * 30);
+
+        physicsEngine.createHitSparks(shuttlecock.x, shuttlecock.y, 8, '#38bdf8');
+        audioEngine.playHit(1.25);
+
+        shuttlecock.launch(outVx, outVy, this.side, false);
+        return { hit: true, isJumpSmash: false, isDropShot: true, swingType: 'drop' };
       } else {
         outVx = targetSideDir * (740 + Math.random() * 50);
         outVy = -(240 + Math.random() * 80);
@@ -511,10 +522,23 @@ export class AIController {
       }
     }
 
-    if (this.reactionTimer > 0.12) {
+    const isHeadingTowardsMe = (this.player.side === 2 && shuttlecock.vx > 0) || (this.player.side === 1 && shuttlecock.vx < 0);
+
+    if (this.reactionTimer > 0.10) {
       this.reactionTimer = 0;
-      if (shuttlecock.inPlay && shuttlecock.vx > 0) {
-        this.targetX = Math.max(this.player.minX + 20, Math.min(this.player.maxX - 20, shuttlecock.x + 20));
+      if (shuttlecock.inPlay && isHeadingTowardsMe) {
+        const trajectory = predictTrajectory(shuttlecock.x, shuttlecock.y, shuttlecock.vx, shuttlecock.vy, shuttlecock.isSmash, 45, 0.035);
+        let predictedX = shuttlecock.x;
+        for (const pt of trajectory) {
+          if (pt.y >= COURT.floorY - 140) {
+            predictedX = pt.x;
+            break;
+          }
+        }
+        const offset = this.player.side === 2 ? -15 : 15;
+        this.targetX = Math.max(this.player.minX + 25, Math.min(this.player.maxX - 25, predictedX + offset));
+      } else if (!shuttlecock.inPlay) {
+        this.targetX = this.player.defaultX;
       } else {
         this.targetX = this.player.defaultX;
       }
@@ -524,17 +548,27 @@ export class AIController {
     if (dx < -16) input.left = true;
     else if (dx > 16) input.right = true;
 
-    if (shuttlecock.inPlay && shuttlecock.x > COURT.netX) {
+    const isOnMySide = (this.player.side === 2 && shuttlecock.x > COURT.netX - 30) || (this.player.side === 1 && shuttlecock.x < COURT.netX + 30);
+
+    if (shuttlecock.inPlay && isOnMySide) {
       const racket = this.player.getRacketHitCenter();
       const dist = Math.hypot(shuttlecock.x - racket.x, shuttlecock.y - racket.y);
 
-      if (this.player.isGrounded && shuttlecock.y < COURT.netTopY - 20 && Math.abs(shuttlecock.x - this.player.x) < 65) {
+      if (this.player.isGrounded && shuttlecock.y < COURT.netTopY - 10 && Math.abs(shuttlecock.x - this.player.x) < 70) {
         input.jump = true;
       }
 
-      if (dist < racket.radius + shuttlecock.radius + 14) {
+      if (dist < racket.radius + shuttlecock.radius + 18) {
         input.swing = true;
-        input.swingType = (!this.player.isGrounded && shuttlecock.y < COURT.netTopY + 20) ? 'hit' : (shuttlecock.y > COURT.floorY - 100 ? 'lob' : 'hit');
+        if (!this.player.isGrounded && shuttlecock.y < COURT.netTopY + 20) {
+          input.swingType = 'hit';
+        } else if (shuttlecock.y > COURT.floorY - 110) {
+          input.swingType = 'lob';
+        } else if (Math.abs(this.player.x - COURT.netX) < 180 && Math.random() < 0.35) {
+          input.swingType = 'drop';
+        } else {
+          input.swingType = 'hit';
+        }
       }
     }
 

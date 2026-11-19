@@ -34,6 +34,9 @@ export class NetworkManager {
     this.onMessage = null;
     this.onPartnerJoin = null;
     this.onPartnerLeave = null;
+    this.onConnectionError = null;
+
+    this.connectionTimeout = null;
 
     // Check URL parameters for direct room joining (e.g. ?room=X8K9P or ?join=X8K9P)
     this.urlRoomCode = this.getRoomCodeFromURL();
@@ -116,12 +119,30 @@ export class NetworkManager {
     return this.roomCode;
   }
 
+  clearConnectionTimeout() {
+    if (this.connectionTimeout) {
+      clearTimeout(this.connectionTimeout);
+      this.connectionTimeout = null;
+    }
+  }
+
   // --- GUEST: JOIN ROOM ---
   joinRoom(code) {
     this.cleanup();
     this.role = 'GUEST';
     this.roomCode = code.toUpperCase().trim();
     this.setStatus('CONNECTING');
+
+    // 8-second connection timeout
+    this.clearConnectionTimeout();
+    this.connectionTimeout = setTimeout(() => {
+      if (this.status !== 'CONNECTED') {
+        this.setStatus('ERROR');
+        if (this.onConnectionError) {
+          this.onConnectionError('Connection timed out (8s). Room not found or host unreachable.');
+        }
+      }
+    }, 8000);
 
     const targetPeerId = `${PEER_PREFIX}${this.roomCode}`;
 
@@ -154,7 +175,13 @@ export class NetworkManager {
 
         this.peer.on('error', (err) => {
           console.warn('[Network] Peer connection warning:', err);
-          this.setStatus('RECONNECTING');
+          if (this.status !== 'CONNECTED') {
+            this.clearConnectionTimeout();
+            this.setStatus('ERROR');
+            if (this.onConnectionError) {
+              this.onConnectionError(`Connection error: ${err.type || 'Room unavailable'}`);
+            }
+          }
         });
       } catch (err) {
         console.warn('[Network] WebRTC Init Error, relying on BroadcastChannel:', err);
@@ -176,6 +203,7 @@ export class NetworkManager {
     this.connection = conn;
 
     conn.on('open', () => {
+      this.clearConnectionTimeout();
       this.isUsingBroadcast = false;
       this.setStatus('CONNECTED');
       if (this.onPartnerJoin) this.onPartnerJoin();
@@ -209,11 +237,13 @@ export class NetworkManager {
 
           // If Host receives announcement from local Guest
           if (this.role === 'HOST' && msg.type === 'GUEST_ANNOUNCE' && this.status !== 'CONNECTED') {
+            this.clearConnectionTimeout();
             this.isUsingBroadcast = true;
             this.setStatus('CONNECTED');
             if (this.onPartnerJoin) this.onPartnerJoin();
             this.sendBroadcast({ type: 'HOST_WELCOME' });
           } else if (this.role === 'GUEST' && msg.type === 'HOST_WELCOME' && this.status !== 'CONNECTED') {
+            this.clearConnectionTimeout();
             this.isUsingBroadcast = true;
             this.setStatus('CONNECTED');
             if (this.onPartnerJoin) this.onPartnerJoin();
@@ -280,6 +310,18 @@ export class NetworkManager {
     }, 2000);
   }
 
+  sendPause(isPaused) {
+    this.send({ type: 'PAUSE_STATE', isPaused });
+  }
+
+  sendReturnToLobby() {
+    this.send({ type: 'RETURN_TO_LOBBY' });
+  }
+
+  sendLeaveMatch() {
+    this.send({ type: 'PARTNER_LEFT' });
+  }
+
   startSolo() {
     this.cleanup();
     this.role = 'SOLO';
@@ -288,6 +330,7 @@ export class NetworkManager {
   }
 
   cleanup() {
+    this.clearConnectionTimeout();
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;

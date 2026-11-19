@@ -23,6 +23,8 @@ class FeatherLineGame {
     this.p1 = new Player(1, 'Player 1', false);
     this.p2 = new Player(2, 'Player 2', false);
     this.ai = new AIController(this.p2);
+    this.network = network;
+    this.input = input;
 
     // Modes & Configuration
     this.mode = 'vs'; // 'vs' or 'coop'
@@ -59,6 +61,14 @@ class FeatherLineGame {
 
     // Remote Guest Input buffer (for Host)
     this.remoteGuestInput = { left: false, right: false, jump: false, swing: false, swingType: 'hit' };
+
+    // Edge-triggered swing state & solo side routing
+    this.soloSwapped = false;
+    this.p1WasSwinging = false;
+    this.p2WasSwinging = false;
+
+    // Expose instance for programmatic testing
+    window.game = this;
 
     // Timing
     this.lastTime = performance.now();
@@ -154,6 +164,17 @@ class FeatherLineGame {
       statTotalPoints: document.getElementById('stat-total-points'),
       statPointsLabel: document.getElementById('stat-points-label'),
       orientationWarning: document.getElementById('orientation-warning'),
+
+      // Network Alerts & Disconnect
+      networkErrorBanner: document.getElementById('network-error-banner'),
+      networkErrorText: document.getElementById('network-error-text'),
+      btnDismissError: document.getElementById('btn-dismiss-error'),
+      guestStatusBanner: document.getElementById('guest-status-banner'),
+      guestStatusText: document.getElementById('guest-status-text'),
+      disconnectOverlay: document.getElementById('disconnect-overlay'),
+      btnDisconnectLobby: document.getElementById('btn-disconnect-lobby'),
+      pauseTitle: document.getElementById('pause-title'),
+      pauseIndicator: document.getElementById('pause-indicator'),
     };
 
     if (this.dom.playerNameInput) {
@@ -262,6 +283,15 @@ class FeatherLineGame {
       this.returnToLobby();
     });
 
+    this.dom.btnDismissError?.addEventListener('click', () => {
+      this.clearNetworkError();
+    });
+
+    this.dom.btnDisconnectLobby?.addEventListener('click', () => {
+      audio.playClick();
+      this.returnToLobby();
+    });
+
     this.dom.btnRematch?.addEventListener('click', () => {
       audio.playClick();
       if (network.role === 'HOST' || network.role === 'SOLO') {
@@ -317,6 +347,13 @@ class FeatherLineGame {
         this.dom.btnStartHostMatch.classList.remove('hidden');
       }
 
+      if (network.role === 'GUEST') {
+        if (this.dom.guestStatusBanner && this.dom.guestStatusText) {
+          this.dom.guestStatusText.textContent = `Connected to Room ${network.roomCode}! Waiting for Host to start match...`;
+          this.dom.guestStatusBanner.classList.remove('hidden');
+        }
+      }
+
       network.send({
         type: 'HELLO',
         name: this.localPlayerName,
@@ -330,11 +367,45 @@ class FeatherLineGame {
         this.dom.waitingPartnerMsg.textContent = 'Partner disconnected. Waiting to reconnect...';
         this.dom.waitingPartnerMsg.style.color = 'var(--gold)';
       }
+      if (this.dom.guestStatusBanner) {
+        this.dom.guestStatusBanner.classList.add('hidden');
+      }
+      if (this.gameState === 'PLAY' || this.gameState === 'SERVE' || this.gameState === 'POINT_SCORED') {
+        this.handlePartnerDisconnect();
+      }
+    };
+
+    network.onConnectionError = (errMsg) => {
+      this.showNetworkError(errMsg);
+      if (this.dom.guestStatusBanner) {
+        this.dom.guestStatusBanner.classList.add('hidden');
+      }
     };
 
     network.onMessage = (data) => {
       this.handleNetworkMessage(data);
     };
+  }
+
+  showNetworkError(message) {
+    if (this.dom.networkErrorBanner && this.dom.networkErrorText) {
+      this.dom.networkErrorText.textContent = message;
+      this.dom.networkErrorBanner.classList.remove('hidden');
+    }
+  }
+
+  clearNetworkError() {
+    if (this.dom.networkErrorBanner) {
+      this.dom.networkErrorBanner.classList.add('hidden');
+    }
+  }
+
+  handlePartnerDisconnect() {
+    this.previousState = this.gameState;
+    this.gameState = 'PAUSED';
+    if (this.dom.disconnectOverlay) {
+      this.dom.disconnectOverlay.classList.remove('hidden');
+    }
   }
 
   updateNetworkUI(status, info) {
@@ -356,6 +427,7 @@ class FeatherLineGame {
   }
 
   createOnlineRoom() {
+    this.clearNetworkError();
     const code = network.createRoom();
     this.p1.name = this.localPlayerName;
     this.p1.assistBoost = this.localAssistBoost;
@@ -370,18 +442,21 @@ class FeatherLineGame {
   }
 
   joinOnlineRoom(code) {
+    this.clearNetworkError();
     this.p2.name = this.localPlayerName;
     this.p2.assistBoost = this.localAssistBoost;
     network.joinRoom(code);
   }
 
   startSoloPractice() {
+    this.clearNetworkError();
+    if (this.dom.guestStatusBanner) this.dom.guestStatusBanner.classList.add('hidden');
     network.startSolo();
     this.p1.name = this.localPlayerName;
     this.p1.assistBoost = this.localAssistBoost;
     this.p2.name = 'AI Bot';
     this.p2.assistBoost = false;
-    this.startMatch('vs');
+    this.startMatch(this.mode); // Supports both 'vs' and 'coop' mode
   }
 
   syncProfile() {
@@ -477,6 +552,30 @@ class FeatherLineGame {
         }
         break;
 
+      case 'PAUSE_STATE':
+        if (msg.isPaused && this.gameState !== 'PAUSED') {
+          this.previousState = this.gameState;
+          this.gameState = 'PAUSED';
+          if (this.dom.pauseTitle) this.dom.pauseTitle.textContent = 'MATCH PAUSED';
+          if (this.dom.pauseIndicator) {
+            this.dom.pauseIndicator.textContent = 'PAUSED BY PARTNER';
+            this.dom.pauseIndicator.classList.remove('hidden');
+          }
+          if (this.dom.pauseMenu) this.dom.pauseMenu.classList.remove('hidden');
+        } else if (!msg.isPaused && this.gameState === 'PAUSED') {
+          this.resumeGame();
+        }
+        break;
+
+      case 'RETURN_TO_LOBBY':
+        this.returnToLobby(false);
+        this.showNetworkError('Partner returned to lobby.');
+        break;
+
+      case 'PARTNER_LEFT':
+        this.handlePartnerDisconnect();
+        break;
+
       case 'SWAP_SIDES':
         this.swapSides();
         break;
@@ -484,6 +583,7 @@ class FeatherLineGame {
   }
 
   swapSides() {
+    this.soloSwapped = !this.soloSwapped;
     const tempName = this.p1.name;
     const tempAssist = this.p1.assistBoost;
 
@@ -553,27 +653,52 @@ class FeatherLineGame {
     this.dom.gameOverScreen.classList.add('hidden');
     this.dom.hud.classList.remove('hidden');
 
+    if (this.dom.guestStatusBanner) this.dom.guestStatusBanner.classList.add('hidden');
+    if (this.dom.networkErrorBanner) this.dom.networkErrorBanner.classList.add('hidden');
+    if (this.dom.disconnectOverlay) this.dom.disconnectOverlay.classList.add('hidden');
+
     this.updateHUD();
     this.setupServe(this.serverSide);
   }
 
-  returnToLobby() {
+  returnToLobby(notifyNetwork = true) {
+    if (notifyNetwork && network.role !== 'SOLO') {
+      network.sendReturnToLobby();
+    }
     this.gameState = 'LOBBY';
     this.dom.lobbyScreen.classList.remove('hidden');
     this.dom.pauseMenu.classList.add('hidden');
     this.dom.gameOverScreen.classList.add('hidden');
     this.dom.hud.classList.add('hidden');
+    if (this.dom.disconnectOverlay) {
+      this.dom.disconnectOverlay.classList.add('hidden');
+    }
   }
 
-  togglePause() {
+  togglePause(sync = true) {
     if (this.gameState === 'PAUSED') {
-      this.gameState = this.previousState;
+      this.gameState = this.previousState || 'PLAY';
       this.dom.pauseMenu.classList.add('hidden');
+      if (sync && network.role !== 'SOLO') {
+        network.sendPause(false);
+      }
     } else if (this.gameState === 'PLAY' || this.gameState === 'SERVE' || this.gameState === 'POINT_SCORED') {
       audio.playClick();
       this.previousState = this.gameState;
       this.gameState = 'PAUSED';
+      if (this.dom.pauseTitle) this.dom.pauseTitle.textContent = 'GAME PAUSED';
+      if (this.dom.pauseIndicator) this.dom.pauseIndicator.classList.add('hidden');
       this.dom.pauseMenu.classList.remove('hidden');
+      if (sync && network.role !== 'SOLO') {
+        network.sendPause(true);
+      }
+    }
+  }
+
+  resumeGame() {
+    if (this.gameState === 'PAUSED') {
+      this.gameState = this.previousState || 'PLAY';
+      this.dom.pauseMenu.classList.add('hidden');
     }
   }
 
@@ -828,8 +953,8 @@ class FeatherLineGame {
         input: {
           left: input.state.left,
           right: input.state.right,
-          jump: input.state.jump,
-          swing: input.state.swing,
+          jump: input.state.jumpPressedThisFrame || input.state.jump,
+          swing: input.state.swingPressedThisFrame,
           swingType: input.state.swingType
         }
       });
@@ -838,14 +963,31 @@ class FeatherLineGame {
     }
 
     // Host or Solo authoritative logic
-    const p1Input = input.state;
-    let p2Input;
+    let p1Input, p2Input;
 
     if (network.role === 'SOLO') {
-      p2Input = this.ai.update(dt, this.shuttlecock);
+      if (this.soloSwapped) {
+        p2Input = input.state;
+        p1Input = this.ai.update(dt, this.shuttlecock);
+      } else {
+        p1Input = input.state;
+        p2Input = this.ai.update(dt, this.shuttlecock);
+      }
     } else {
+      p1Input = input.state;
       p2Input = this.remoteGuestInput;
     }
+
+    // Edge-triggered swing determination
+    const p1WantsSwing = (network.role === 'SOLO' && this.soloSwapped)
+      ? p1Input.swing
+      : (input.state.swingPressedThisFrame || (p1Input.swing && !this.p1WasSwinging));
+
+    const p2WantsSwing = (network.role === 'SOLO' && !this.soloSwapped)
+      ? p2Input.swing
+      : (network.role === 'SOLO'
+          ? (input.state.swingPressedThisFrame || (p2Input.swing && !this.p2WasSwinging))
+          : (p2Input.swing && !this.p2WasSwinging));
 
     // --- State: SERVE (Guided Serve System) ---
     if (this.gameState === 'SERVE') {
@@ -860,7 +1002,7 @@ class FeatherLineGame {
         this.shuttlecock.y = this.p1.y + 36;
 
         // Press HIT (S / Space / Down / Touch HIT) to serve cleanly
-        if (p1Input.swing || this.serveTimer > 4.5) {
+        if (p1WantsSwing || this.serveTimer > 4.5) {
           const params = this.p1.getServeParameters(p1Input.swingType || 'drive');
           this.p1.swing(p1Input.swingType || 'hit');
           this.launchServe(1, params);
@@ -869,13 +1011,15 @@ class FeatherLineGame {
         this.shuttlecock.x = this.p2.x - 36;
         this.shuttlecock.y = this.p2.y + 36;
 
-        if (p2Input.swing || this.serveTimer > 4.5) {
+        if (p2WantsSwing || this.serveTimer > 4.5) {
           const params = this.p2.getServeParameters(p2Input.swingType || 'drive');
           this.p2.swing(p2Input.swingType || 'hit');
           this.launchServe(2, params);
         }
       }
 
+      this.p1WasSwinging = p1Input.swing;
+      this.p2WasSwinging = p2Input.swing;
       this.broadcastHostState();
       input.clearFrameFlags();
       return;
@@ -884,12 +1028,15 @@ class FeatherLineGame {
     // --- State: PLAY ---
     if (this.gameState === 'PLAY') {
       if (p1Input.jump && this.p1.isGrounded) this.p1.jump(this.physics);
-      if (p1Input.swing) this.p1.swing(p1Input.swingType);
+      if (p1WantsSwing) this.p1.swing(p1Input.swingType);
       this.p1.update(dt, p1Input, this.physics);
 
       if (p2Input.jump && this.p2.isGrounded) this.p2.jump(this.physics);
-      if (p2Input.swing) this.p2.swing(p2Input.swingType);
+      if (p2WantsSwing) this.p2.swing(p2Input.swingType);
       this.p2.update(dt, p2Input, this.physics);
+
+      this.p1WasSwinging = p1Input.swing;
+      this.p2WasSwinging = p2Input.swing;
 
       const isCoop = this.mode === 'coop';
 
@@ -1034,5 +1181,5 @@ class FeatherLineGame {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  new FeatherLineGame();
+  window.game = new FeatherLineGame();
 });

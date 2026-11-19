@@ -288,30 +288,36 @@ export class Shuttlecock {
       this.rotation += diff * Math.min(1.0, 16 * dt);
     }
 
-    // Net & Net-Tape Collision
+    // Net & Net-Tape Continuous Segment Collision
     const netHalfW = COURT.netThickness / 2;
-    const crossedNetX = (prevX < COURT.netX && this.x >= COURT.netX - netHalfW) ||
-                        (prevX > COURT.netX && this.x <= COURT.netX + netHalfW);
+    const crossedFromLeft = (prevX < COURT.netX && this.x >= COURT.netX - netHalfW);
+    const crossedFromRight = (prevX > COURT.netX && this.x <= COURT.netX + netHalfW);
 
-    if (crossedNetX) {
-      if (this.y >= COURT.netTopY) {
-        if (Math.abs(this.y - COURT.netTopY) < 12) {
+    if (crossedFromLeft || crossedFromRight) {
+      const dx = this.x - prevX;
+      const t = Math.abs(dx) > 0.0001 ? Math.max(0, Math.min(1, (COURT.netX - prevX) / dx)) : 0.5;
+      const crossingY = prevY + t * (this.y - prevY);
+
+      if (crossingY >= COURT.netTopY - 6 && crossingY <= COURT.floorY) {
+        if (Math.abs(crossingY - COURT.netTopY) < 14) {
           // Top Net-Tape Clip
+          this.x = COURT.netX + (crossedFromLeft ? 4 : -4);
           this.y = COURT.netTopY - 2;
-          this.vx *= 0.45;
+          this.vx = (crossedFromLeft ? 1 : -1) * Math.max(80, Math.abs(this.vx) * 0.45);
           this.vy = -Math.abs(this.vy) * 0.35 + 40;
           this.isSmash = false;
-          physicsEngine.createHitSparks(this.x, this.y, 8, '#ffffff');
-          audioEngine.playNetClip();
+          if (physicsEngine) physicsEngine.createHitSparks(this.x, this.y, 10, '#ffffff');
+          if (audioEngine) audioEngine.playNetClip();
           if (onNetClip) onNetClip();
-        } else {
-          // Rebound
-          this.x = prevX < COURT.netX ? COURT.netX - netHalfW - 4 : COURT.netX + netHalfW + 4;
+        } else if (crossingY > COURT.netTopY + 8) {
+          // Rebound off net mesh
+          this.x = crossedFromLeft ? (COURT.netX - netHalfW - 6) : (COURT.netX + netHalfW + 6);
+          this.y = Math.min(COURT.floorY - this.radius, crossingY);
           this.vx = -this.vx * 0.22;
           this.vy *= 0.35;
           this.isSmash = false;
-          audioEngine.playNetClip();
-          physicsEngine.createHitSparks(this.x, this.y, 6, '#cbd5e1');
+          if (audioEngine) audioEngine.playNetClip();
+          if (physicsEngine) physicsEngine.createHitSparks(this.x, this.y, 8, '#cbd5e1');
         }
       }
     }
@@ -323,7 +329,7 @@ export class Shuttlecock {
       this.vy = 0;
       this.inPlay = false;
       this.hasTouchedFloor = true;
-      physicsEngine.createDust(this.x, this.y);
+      if (physicsEngine) physicsEngine.createDust(this.x, this.y);
 
       const isOut = (this.x < COURT.leftBound || this.x > COURT.rightBound);
       if (onFloorLanding) {
@@ -355,7 +361,7 @@ export class Shuttlecock {
 
     // Clamp indicator horizontal position within canvas margins
     const clampedX = Math.max(60, Math.min(COURT.width - 60, this.x));
-    const indicatorY = 26; // Fixed top edge margin
+    const indicatorY = 32; // Fixed top edge margin with clearance from scoreboard
 
     // Subtle scale based on altitude
     const scale = Math.min(1.35, 0.95 + (altitude / 260));
@@ -423,6 +429,19 @@ export class Shuttlecock {
   }
 
   draw(ctx) {
+    // Dynamic floor shadow under shuttlecock
+    if (this.inPlay && this.y < COURT.floorY) {
+      const heightAboveFloor = Math.max(0, COURT.floorY - this.y);
+      const shadowAlpha = Math.max(0.08, 0.40 - heightAboveFloor / 650);
+      const shadowWidth = Math.max(6, 24 - heightAboveFloor / 38);
+      ctx.save();
+      ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
+      ctx.beginPath();
+      ctx.ellipse(this.x, COURT.floorY - 2, shadowWidth, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     if (this.history.length > 2) {
       ctx.save();
       for (let i = 0; i < this.history.length - 1; i++) {
